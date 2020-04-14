@@ -145,6 +145,9 @@ typedef struct ucontext {
 
 #elif defined(__i386__)
 
+#elif defined(__x86_64__)
+
+#if !defined(__BIONIC_HAVE_UCONTEXT_T)
 /* Taken from Google Breakpad. */
 
 /* 80-bit floating-point register */
@@ -197,7 +200,6 @@ enum {
   REG_SS,
 };
 
-#if !defined(__BIONIC_HAVE_UCONTEXT_T)
 typedef struct ucontext {
   uint32_t uc_flags;
   struct ucontext* uc_link;
