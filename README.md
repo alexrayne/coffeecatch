@@ -120,3 +120,8 @@ void my_function() {
 
 If you wish to catch signals and continue running your program rather than ending it (this may be dangerous, especially if a crash was spotted within a C library function, such as `malloc()`), use the `coffeecatch_cancel_pending_alarm()` function to cancel the default pending alarm triggered to avoid deadlocks.
 
+If you need to catch SIGSEGV with no crash JNI application, add `SIG_ABORT_SIGSEGV=1` to definitions.
+
+If you want use debug/error printers other then stdio, use NDK_DEBUG==2, and provide
+pinters `coffeecatch_print/printf`
+
