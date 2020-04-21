@@ -82,13 +82,19 @@ static void print(const char *const s){
 }
 #endif
 
+#define GOODMARK 0x5aa53ef0
+
 /*#define NDK_DEBUG 1*/
 #if ( defined(NDK_DEBUG) && ( NDK_DEBUG >= 1 ) )
 #define DEBUG(A) do { A; } while(0)
 #define ERROR(A)   do { A; } while(0)
+#define set_goodmark(ps) do {(ps)->goodmark = GOODMARK;}while(0)
+#define check_goodmark(ps) ASSERT( (ps)->goodmark == GOODMARK )
 #else
 #define DEBUG(A)
 #define ERROR(A)   do { A; } while(0)
+#define set_goodmark(ps)
+#define check_goodmark(ps)
 #endif
 
 #define ASSERT( A ) do { if (!(A)) ERROR(printf("%d:%s\n", __LINE__, #A)); assert(A); } while(0)
@@ -282,6 +288,9 @@ typedef void (*t_free_backtrace_symbols)(backtrace_symbol_t* symbols,
 typedef struct native_code_global_struct {
   /* Initialized. */
   int initialized;
+#if ( defined(NDK_DEBUG) && (NDK_DEBUG >= 1) )
+  int goodmark;
+#endif
 
   /* Lock. */
   pthread_mutex_t mutex;
@@ -289,7 +298,12 @@ typedef struct native_code_global_struct {
   /* Backup of sigaction. */
   struct sigaction *sa_old;
 } native_code_global_struct;
+
+#if ( defined(NDK_DEBUG) && (NDK_DEBUG >= 1) )
+#define NATIVE_CODE_GLOBAL_INITIALIZER { 0, GOODMARK, PTHREAD_MUTEX_INITIALIZER, NULL }
+#else
 #define NATIVE_CODE_GLOBAL_INITIALIZER { 0, PTHREAD_MUTEX_INITIALIZER, NULL }
+#endif
 
 /* Thread-specific crash handler structure. */
 typedef struct native_code_handler_struct {
@@ -297,6 +311,9 @@ typedef struct native_code_handler_struct {
   sigjmp_buf ctx;
   int ctx_is_set;
   int reenter;
+#if ( defined(NDK_DEBUG) && (NDK_DEBUG >= 1) )
+    int goodmark;
+#endif
 
   /* Alternate stack. */
   char *stack_buffer;
@@ -334,7 +351,7 @@ static native_code_global_struct native_code_g =
   NATIVE_CODE_GLOBAL_INITIALIZER;
 
 /* Thread variable holding context. */
-pthread_key_t native_code_thread;
+pthread_key_t native_code_thread = -1;
 
 #if (defined(USE_UNWIND) && !defined(USE_CORKSCREW))
 #ifndef _URC_OK
@@ -347,7 +364,7 @@ coffeecatch_unwind_callback(struct _Unwind_Context* context, void* arg) {
 
   const uintptr_t ip = _Unwind_GetIP(context);
 
-  DEBUG(print("called unwind callback\n"));
+  DEBUG(printf("called unwind callback for ip:$%lx\n", (unsigned long)ip));
 
   if (ip != 0x0) {
     if (s->frames_skip == 0) {
@@ -359,6 +376,7 @@ coffeecatch_unwind_callback(struct _Unwind_Context* context, void* arg) {
   }
 
   if (s->frames_size == BACKTRACE_FRAMES_MAX) {
+      DEBUG(print("returned _URC_END_OF_STACK\n"));
     return _URC_END_OF_STACK;
   } else {
     DEBUG(print("returned _URC_OK\n"));
@@ -568,6 +586,23 @@ static void coffeecatch_copy_context(native_code_handler_struct *const t,
   /* Skip us and the caller. */
   t->frames_skip = 2;
 
+
+#ifdef USE_LIBUNWIND
+  if (t->frames_size == 0) {
+    t->frames_size = coffeecatch_unwind_signal(si, sc, t->uframes, 0,
+                                               BACKTRACE_FRAMES_MAX);
+#ifdef USE_CORKSCREW
+    size_t i;
+    for(i = 0 ; i < t->frames_size ; i++) {
+      t->frames[i].absolute_pc = (uintptr_t) t->uframes[i];
+      t->frames[i].stack_top = 0;
+      t->frames[i].stack_size = 0;
+    }
+#endif
+  }
+#endif
+
+  if (t->frames_size == 0) {
   /* Use the corkscrew library to extract the backtrace. */
 #ifdef USE_CORKSCREW
   t->frames_size = coffeecatch_backtrace_signal(si, sc, t->frames, 0,
@@ -576,19 +611,7 @@ static void coffeecatch_copy_context(native_code_handler_struct *const t,
   /* Unwind frames (equivalent to backtrace()) */
   _Unwind_Backtrace(coffeecatch_unwind_callback, t);
 #endif
-
-#ifdef USE_LIBUNWIND
-  if (t->frames_size == 0) {
-    size_t i;
-    t->frames_size = coffeecatch_unwind_signal(si, sc, t->uframes, 0,
-                                               BACKTRACE_FRAMES_MAX);
-    for(i = 0 ; i < t->frames_size ; i++) {
-      t->frames[i].absolute_pc = (uintptr_t) t->uframes[i];
-      t->frames[i].stack_top = 0;
-      t->frames[i].stack_size = 0;
-    }
   }
-#endif
 
   if (t->frames_size != 0) {
     DEBUG(print("called _Unwind_Backtrace()\n"));
@@ -702,6 +725,7 @@ static void coffeecatch_signal_abort(const int code, siginfo_t *const si,
 /* Internal globals initialization. */
 static int coffeecatch_handler_setup_global(void) {
   if (native_code_g.initialized++ == 0) {
+    set_goodmark(&native_code_g);
     size_t i;
     struct sigaction sa_abort;
     struct sigaction sa_pass;
@@ -799,6 +823,7 @@ static native_code_handler_struct* coffeecatch_native_code_handler_struct_init(v
   }
 
   DEBUG(print("installing thread alternative stack\n"));
+  set_goodmark(t);
 
   /* Initialize structure */
   t->stack_buffer_size = SIG_STACK_BUFFER_SIZE;
@@ -889,6 +914,7 @@ static int coffeecatch_handler_cleanup() {
   /* Cleanup locals. */
   native_code_handler_struct *const t = coffeecatch_get();
   if (t != NULL) {
+    check_goodmark(t);
     DEBUG(print("removing thread alternative stack\n"));
 
     /* Erase thread-specific value now (detach). */
@@ -903,8 +929,12 @@ static int coffeecatch_handler_cleanup() {
 
     DEBUG(print("removed thread alternative stack\n"));
   }
+  else {
+      DEBUG(print("cleanup empty\n"));
+  }
 
   /* Cleanup globals. */
+  check_goodmark(&native_code_g);
   if (pthread_mutex_lock(&native_code_g.mutex) != 0) {
     ASSERT(! "pthread_mutex_lock() failed");
   }
@@ -1424,6 +1454,8 @@ void coffeecatch_get_backtrace_info(void (*fun)(void *arg,
  * Returns 1 if we are already inside a coffeecatch block, 0 otherwise.
  */
 int coffeecatch_inside() {
+  if (native_code_g.initialized == 0)
+      return 0;
   native_code_handler_struct *const t = coffeecatch_get();
   if (t != NULL && t->reenter > 0) {
     t->reenter++;
@@ -1453,9 +1485,14 @@ int coffeecatch_setup() {
  * Calls coffeecatch_handler_cleanup()
  */
 void coffeecatch_cleanup() {
+  check_goodmark(&native_code_g);
+  if (native_code_g.initialized == 0)
+      return;
+
   native_code_handler_struct *const t = coffeecatch_get();
   ASSERT(t != NULL);
   ASSERT(t->reenter > 0);
+  check_goodmark(t);
   t->reenter--;
   if (t->reenter == 0) {
     t->ctx_is_set = 0;
@@ -1466,12 +1503,14 @@ void coffeecatch_cleanup() {
 sigjmp_buf* coffeecatch_get_ctx() {
   native_code_handler_struct* t = coffeecatch_get();
   ASSERT(t != NULL);
+  check_goodmark(t);
   return &t->ctx;
 }
 
 void coffeecatch_abort(const char* exp, const char* file, int line) {
   native_code_handler_struct *const t = coffeecatch_get();
   if (t != NULL) {
+    check_goodmark(t);
     t->expression = exp;
     t->file = file;
     t->line = line;
