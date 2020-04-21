@@ -58,7 +58,7 @@
 #include <dlfcn.h>
 #include "coffeecatch.h"
 
-#if ( defined(NDK_DEBUG) && ( NDK_DEBUG == 1 ) )
+#if ( defined(NDK_DEBUG) && ((NDK_DEBUG & 3)== 1) )
 #define FD_ERRNO 2
 static void print(const char *const s) {
   size_t count;
@@ -66,7 +66,7 @@ static void print(const char *const s) {
   /* write() is async-signal-safe. */
   (void) write(FD_ERRNO, s, count);
 }
-#elif ( defined(NDK_DEBUG) && ( NDK_DEBUG == 2 ) )
+#elif ( defined(NDK_DEBUG) && ((NDK_DEBUG & 3)== 2) )
 
 //with NDK_DEBUG = 2 external printers mayt be provided by application
 //    to log coffee messages
@@ -90,7 +90,15 @@ static void print(const char *const s){
 #define ERROR(A)   do { A; } while(0)
 #define set_goodmark(ps) do {(ps)->goodmark = GOODMARK;}while(0)
 #define check_goodmark(ps) ASSERT( (ps)->goodmark == GOODMARK )
+
+#if ( defined(NDK_DEBUG) && ( NDK_DEBUG > 2 ) )
+#define TRACE(A) do { A; } while(0)
 #else
+#define TRACE(A)
+#endif
+
+#else
+#define TRACE(A)
 #define DEBUG(A)
 #define ERROR(A)   do { A; } while(0)
 #define set_goodmark(ps)
@@ -586,7 +594,6 @@ static void coffeecatch_copy_context(native_code_handler_struct *const t,
   /* Skip us and the caller. */
   t->frames_skip = 2;
 
-
 #ifdef USE_LIBUNWIND
   if (t->frames_size == 0) {
     t->frames_size = coffeecatch_unwind_signal(si, sc, t->uframes, 0,
@@ -649,7 +656,7 @@ static void coffeecatch_signal_pass(const int code, siginfo_t *const si,
                                     void *const sc) {
   native_code_handler_struct *t;
 
-  DEBUG(printf("caught signal sig%d\n", code));
+  ERROR(printf("caught signal sig%d\n", code));
 
   /* Call the "real" Java handler for JIT and internals. */
   coffeecatch_call_old_signal_handler(code, si, sc);
@@ -678,7 +685,7 @@ static void coffeecatch_signal_pass(const int code, siginfo_t *const si,
   }
 
   /* Nope. (abort() is signal-safe) */
-  DEBUG(print("calling abort()\n"));
+  ERROR(print("calling abort()\n"));
   signal(SIGABRT, SIG_DFL);
   abort();
 }
@@ -691,7 +698,7 @@ static void coffeecatch_signal_abort(const int code, siginfo_t *const si,
 
   (void) sc; /* UNUSED */
 
-  DEBUG(printf("caught abort sig%d\n", code));
+  ERROR(printf("caught abort sig%d\n", code));
 
   /* Ensure we do not deadlock. Default of ALRM is to die.
    * (signal() and alarm() are signal-safe) */
@@ -718,7 +725,7 @@ static void coffeecatch_signal_abort(const int code, siginfo_t *const si,
   coffeecatch_call_old_signal_handler(code, si, sc);
 
   /* Nope. (abort() is signal-safe) */
-  DEBUG(print("calling abort()\n"));
+  ERROR(print("calling abort()\n"));
   abort();
 }
 
@@ -730,7 +737,7 @@ static int coffeecatch_handler_setup_global(void) {
     struct sigaction sa_abort;
     struct sigaction sa_pass;
 
-    DEBUG(print("installing global signal handlers\n"));
+    TRACE(print("installing global signal handlers\n"));
 
     /* Setup handler structure. */
     memset(&sa_abort, 0, sizeof(sa_abort));
@@ -762,6 +769,7 @@ static int coffeecatch_handler_setup_global(void) {
       }
       ASSERT(sig < SIG_NUMBER_MAX);
       if (sigaction(sig, action, &native_code_g.sa_old[sig]) != 0) {
+        ERROR(printf("can`t install global handler  sig%d\n", sig));
         return -1;
       }
     }
@@ -822,7 +830,7 @@ static native_code_handler_struct* coffeecatch_native_code_handler_struct_init(v
     return NULL;
   }
 
-  DEBUG(print("installing thread alternative stack\n"));
+  TRACE(print("installing thread alternative stack\n"));
   set_goodmark(t);
 
   /* Initialize structure */
@@ -862,7 +870,7 @@ static native_code_handler_struct* coffeecatch_native_code_handler_struct_init(v
 static int coffeecatch_handler_setup(int setup_thread) {
   int code;
 
-  DEBUG(print("setup for a new handler\n"));
+  TRACE(print("setup for a new handler\n"));
 
   /* Initialize globals. */
   if (pthread_mutex_lock(&native_code_g.mutex) != 0) {
@@ -885,18 +893,20 @@ static int coffeecatch_handler_setup(int setup_thread) {
       coffeecatch_native_code_handler_struct_init();
 
     if (t == NULL) {
+      ERROR(print("thread alternative can`t allocate\n"));
       return -1;
     }
 
-    DEBUG(print("installing thread alternative stack\n"));
+    TRACE(print("installing thread alternative\n"));
 
     /* Set thread-specific value. */
     if (pthread_setspecific(native_code_thread, t) != 0) {
+      ERROR(print("thread can`t specify alternative\n"));
       coffeecatch_native_code_handler_struct_free(t);
       return -1;
     }
 
-    DEBUG(print("installed thread alternative stack\n"));
+    DEBUG(print("installed thread alternative\n"));
   }
 
   /* OK. */
@@ -915,7 +925,7 @@ static int coffeecatch_handler_cleanup() {
   native_code_handler_struct *const t = coffeecatch_get();
   if (t != NULL) {
     check_goodmark(t);
-    DEBUG(print("removing thread alternative stack\n"));
+    TRACE(print("removing thread alternative stack\n"));
 
     /* Erase thread-specific value now (detach). */
     if (pthread_setspecific(native_code_thread, NULL) != 0) {
@@ -924,6 +934,7 @@ static int coffeecatch_handler_cleanup() {
 
     /* Free handler and reset slternate stack */
     if (coffeecatch_native_code_handler_struct_free(t) != 0) {
+      ERROR( print("fail remove thread alternative stack\n") );
       return -1;
     }
 
@@ -942,13 +953,14 @@ static int coffeecatch_handler_cleanup() {
   if (--native_code_g.initialized == 0) {
     size_t i;
 
-    DEBUG(print("removing global signal handlers\n"));
+    TRACE(print("removing global signal handlers\n"));
 
     /* Restore signal handler. */
     for(i = 0; native_sig_catch[i] != 0; i++) {
       const int sig = native_sig_catch[i];
       ASSERT(sig < SIG_NUMBER_MAX);
       if (sigaction(sig, &native_code_g.sa_old[sig], NULL) != 0) {
+        ERROR(printf("fail recover action sig%d\n", sig));
         return -1;
       }
     }
@@ -1477,6 +1489,7 @@ int coffeecatch_setup() {
     t->ctx_is_set = 1;
     return 0;
   } else {
+    ERROR( print("fail coffeecatch_setup()\n") );
     return -1;
   }
 }
@@ -1486,8 +1499,10 @@ int coffeecatch_setup() {
  */
 void coffeecatch_cleanup() {
   check_goodmark(&native_code_g);
-  if (native_code_g.initialized == 0)
+  if (native_code_g.initialized == 0){
+      ERROR( print("cleanup ommit\n") );
       return;
+  }
 
   native_code_handler_struct *const t = coffeecatch_get();
   ASSERT(t != NULL);
@@ -1497,6 +1512,7 @@ void coffeecatch_cleanup() {
   if (t->reenter == 0) {
     t->ctx_is_set = 0;
     coffeecatch_handler_cleanup();
+    ASSERT(native_code_g.initialized == 0);
   }
 }
 
