@@ -292,26 +292,8 @@ typedef void (*t_free_backtrace_symbols)(backtrace_symbol_t* symbols,
 
 #endif
 
-/* Process-wide crash handler structure. */
-typedef struct native_code_global_struct {
-  /* Initialized. */
-  int initialized;
-#if ( defined(NDK_DEBUG) && (NDK_DEBUG >= 1) )
-  int goodmark;
-#endif
 
-  /* Lock. */
-  pthread_mutex_t mutex;
 
-  /* Backup of sigaction. */
-  struct sigaction *sa_old;
-} native_code_global_struct;
-
-#if ( defined(NDK_DEBUG) && (NDK_DEBUG >= 1) )
-#define NATIVE_CODE_GLOBAL_INITIALIZER { 0, GOODMARK, PTHREAD_MUTEX_INITIALIZER, NULL }
-#else
-#define NATIVE_CODE_GLOBAL_INITIALIZER { 0, PTHREAD_MUTEX_INITIALIZER, NULL }
-#endif
 
 /* Thread-specific crash handler structure. */
 typedef struct native_code_handler_struct {
@@ -354,12 +336,43 @@ typedef struct native_code_handler_struct {
   int alarm;
 } native_code_handler_struct;
 
+
+
+/* Process-wide crash handler structure. */
+typedef struct native_code_global_struct {
+  /* Initialized. */
+  int initialized;
+#if ( defined(NDK_DEBUG) && (NDK_DEBUG >= 1) )
+  int goodmark;
+#endif
+
+  /* Lock. */
+  pthread_mutex_t mutex;
+
+  /* Backup of sigaction. */
+  struct sigaction *sa_old;
+
+  // globaly allocated handler, allow avoid allocation every time,
+  //   just allocates once
+  struct native_code_handler_struct* statics_h;
+
+} native_code_global_struct;
+
+#if ( defined(NDK_DEBUG) && (NDK_DEBUG >= 1) )
+#define NATIVE_CODE_GLOBAL_INITIALIZER { 0, GOODMARK, PTHREAD_MUTEX_INITIALIZER, NULL, NULL }
+#else
+#define NATIVE_CODE_GLOBAL_INITIALIZER { 0, PTHREAD_MUTEX_INITIALIZER, NULL, NULL }
+#endif
+
 /* Global crash handler structure. */
 static native_code_global_struct native_code_g =
   NATIVE_CODE_GLOBAL_INITIALIZER;
 
 /* Thread variable holding context. */
 pthread_key_t native_code_thread = -1;
+
+
+
 
 #if (defined(USE_UNWIND) && !defined(USE_CORKSCREW))
 #ifndef _URC_OK
@@ -733,11 +746,24 @@ static void coffeecatch_signal_abort(const int code, siginfo_t *const si,
 static int coffeecatch_handler_setup_global(void) {
   if (native_code_g.initialized++ == 0) {
     set_goodmark(&native_code_g);
+
+    /* Initialize thread var. */
+    if (pthread_key_create(&native_code_thread, NULL) != 0) {
+      ERROR(print("can`t create key\n"));
+      return -1;
+    }
+
+    /* Allocate */
+    native_code_g.sa_old = calloc(sizeof(struct sigaction), SIG_NUMBER_MAX);
+    if (native_code_g.sa_old == NULL) {
+      return -1;
+    }
+
+    TRACE(print("installing global signal handlers\n"));
+
     size_t i;
     struct sigaction sa_abort;
     struct sigaction sa_pass;
-
-    TRACE(print("installing global signal handlers\n"));
 
     /* Setup handler structure. */
     memset(&sa_abort, 0, sizeof(sa_abort));
@@ -749,12 +775,6 @@ static int coffeecatch_handler_setup_global(void) {
     sigemptyset(&sa_pass.sa_mask);
     sa_pass.sa_sigaction = coffeecatch_signal_pass;
     sa_pass.sa_flags = SA_SIGINFO | SA_ONSTACK;
-
-    /* Allocate */
-    native_code_g.sa_old = calloc(sizeof(struct sigaction), SIG_NUMBER_MAX);
-    if (native_code_g.sa_old == NULL) {
-      return -1;
-    }
 
     /* Setup signal handlers for SIGABRT (Java calls abort()) and others. **/
     for (i = 0; native_sig_catch[i] != 0; i++) {
@@ -774,11 +794,6 @@ static int coffeecatch_handler_setup_global(void) {
       }
     }
 
-    /* Initialize thread var. */
-    if (pthread_key_create(&native_code_thread, NULL) != 0) {
-      return -1;
-    }
-
     DEBUG(print("installed global signal handlers\n"));
   }
 
@@ -786,6 +801,8 @@ static int coffeecatch_handler_setup_global(void) {
   return 0;
 }
 
+static
+void coffeecatch_native_code_handler_struct_delete(native_code_handler_struct *const t);
 /**
  * Free a native_code_handler_struct structure.
  **/
@@ -796,6 +813,8 @@ static int coffeecatch_native_code_handler_struct_free(native_code_handler_struc
     return -1;
   }
 
+  check_goodmark(t);
+
 #ifndef NO_USE_SIGALTSTACK
   /* Restore previous alternative stack. */
   if (t->stack_old.ss_sp != NULL && sigaltstack(&t->stack_old, NULL) != 0) {
@@ -804,6 +823,20 @@ static int coffeecatch_native_code_handler_struct_free(native_code_handler_struc
 #endif
   }
 #endif
+
+  if (t != native_code_g.statics_h)
+      coffeecatch_native_code_handler_struct_delete(t);
+
+  return code;
+}
+
+static
+void coffeecatch_native_code_handler_struct_delete(native_code_handler_struct *const t) {
+    if (t == NULL) {
+      return;
+    }
+
+  check_goodmark(t);
 
   /* Free alternative stack */
   if (t->stack_buffer != NULL) {
@@ -814,15 +847,13 @@ static int coffeecatch_native_code_handler_struct_free(native_code_handler_struc
 
   /* Free structure. */
   free(t);
-
-  return code;
 }
 
 /**
  * Create a native_code_handler_struct structure.
  **/
-static native_code_handler_struct* coffeecatch_native_code_handler_struct_init(void) {
-  stack_t stack;
+static
+native_code_handler_struct* coffeecatch_native_code_handler_struct_alloc(void) {
   native_code_handler_struct *const t =
     calloc(sizeof(native_code_handler_struct), 1);
 
@@ -830,25 +861,45 @@ static native_code_handler_struct* coffeecatch_native_code_handler_struct_init(v
     return NULL;
   }
 
-  TRACE(print("installing thread alternative stack\n"));
-  set_goodmark(t);
-
+#ifndef NO_USE_SIGALTSTACK
   /* Initialize structure */
   t->stack_buffer_size = SIG_STACK_BUFFER_SIZE;
   t->stack_buffer = malloc(t->stack_buffer_size);
   if (t->stack_buffer == NULL) {
     DEBUG(print("cant alloc alternative stack\n"));
-    coffeecatch_native_code_handler_struct_free(t);
+    /* Free structure. */
+    free(t);
     return NULL;
   }
+#endif
+  set_goodmark(t);
+  return t;
+}
 
+static
+native_code_handler_struct* coffeecatch_native_code_handler_struct_init(void) {
+  native_code_handler_struct * t;
+
+  t = native_code_g.statics_h;
+  if (t != NULL)
+      check_goodmark(t);
+  else {
+      t = coffeecatch_native_code_handler_struct_alloc();
+      if (t == NULL) {
+        return NULL;
+      }
+  }
+
+  TRACE(print("installing thread alternative stack\n"));
+
+#ifndef NO_USE_SIGALTSTACK
+  stack_t stack;
   /* Setup alternative stack. */
   memset(&stack, 0, sizeof(stack));
   stack.ss_sp = t->stack_buffer;
   stack.ss_size = t->stack_buffer_size;
   stack.ss_flags = 0;
 
-#ifndef NO_USE_SIGALTSTACK
   /* Install alternative stack. This is thread-safe */
   if (sigaltstack(&stack, &t->stack_old) != 0) {
 #ifndef USE_SILENT_SIGALTSTACK
@@ -860,6 +911,39 @@ static native_code_handler_struct* coffeecatch_native_code_handler_struct_init(v
 #endif
 
   return t;
+}
+
+
+/**
+ * prepare global structs for current thread
+ * */
+void coffeecatch_prepare(void){
+    ASSERT( native_code_g.initialized == 0 );
+    if (native_code_g.statics_h != NULL)
+        return;
+
+    native_code_handler_struct *const
+        t = coffeecatch_native_code_handler_struct_alloc();
+    native_code_g.statics_h = t;
+    DEBUG(print("allocated alternative stack\n"));
+}
+
+/**
+ * release prepares global structs
+ * */
+void coffeecatch_release(void){
+    ASSERT( native_code_g.initialized == 0 );
+
+    native_code_handler_struct *const
+        t = native_code_g.statics_h;
+
+    if (t == NULL)
+        return;
+
+    DEBUG(print("delete alternative stack\n"));
+
+    native_code_g.statics_h = NULL;
+    coffeecatch_native_code_handler_struct_delete(t);
 }
 
 /**
@@ -973,6 +1057,7 @@ static int coffeecatch_handler_cleanup() {
     if (pthread_key_delete(native_code_thread) != 0) {
       ASSERT(! "pthread_key_delete() failed");
     }
+    native_code_thread = -1;
 
     DEBUG(print("removed global signal handlers\n"));
   }

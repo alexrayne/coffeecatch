@@ -206,6 +206,15 @@ extern void coffeecatch_get_backtrace_info(void (*fun)(void *arg,
  */
 extern int coffeecatch_cancel_pending_alarm(void);
 
+/**
+ * prepare global structs for current thread
+ * */
+extern void coffeecatch_prepare(void);
+/**
+ * release prepares global structs
+ * */
+extern void coffeecatch_release(void);
+
 /** Internal functions & definitions, not to be used directly. **/
 #include <setjmp.h>
 extern int coffeecatch_inside(void);
