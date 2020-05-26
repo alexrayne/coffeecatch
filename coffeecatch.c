@@ -502,10 +502,24 @@ static void coffeecatch_try_jump_userland(native_code_handler_struct*
 }
 
 static void coffeecatch_start_alarm(void) {
+  coffeecatch_on_alarm();
   /* Ensure we do not deadlock. Default of ALRM is to die.
    * (signal() and alarm() are signal-safe) */
   (void) alarm(30);
 }
+
+#ifndef __WEAK
+#define __WEAK __attribute__((weak))
+#endif
+#ifndef __NOINLINE
+#define __NOINLINE __attribute__((noinline))
+#endif
+
+__WEAK __NOINLINE
+void coffeecatch_on_alarm(void){
+
+}
+
 
 static void coffeecatch_mark_alarm(native_code_handler_struct *const t) {
   t->alarm = 1;

@@ -198,6 +198,8 @@ extern void coffeecatch_get_backtrace_info(void (*fun)(void *arg,
                                            const char *function,
                                            uintptr_t offset), void *arg);
 
+extern void coffeecatch_on_alarm(void);
+
 /**
  * Cancel any pending alarm() triggered after a signal was caught.
  * Calling this function is dangerous, because it exposes the process to
